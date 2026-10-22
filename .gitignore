@@ -1,0 +1,19 @@
+# Gradle / Android
+.gradle/
+build/
+*/build/
+*.apk
+*.aab
+local.properties
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Databases and local backups
+*.db
+*.sqlite
+user_device_backup.db
+
