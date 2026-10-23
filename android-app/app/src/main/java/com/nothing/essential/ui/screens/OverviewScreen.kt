@@ -44,6 +44,9 @@ fun OverviewScreen(
     var isFocusMode by remember { mutableStateOf(false) }
     var weeklyStatus by remember { mutableStateOf<List<Pair<String, Boolean>>>(emptyList()) }
 
+    var focusSecondsRemaining by remember { mutableStateOf(25 * 60) }
+    var isFocusTimerRunning by remember { mutableStateOf(false) }
+
     fun refreshData() {
         val loadedSettings = database.getSettings()
         settings = loadedSettings
@@ -51,6 +54,20 @@ fun OverviewScreen(
         problems = database.getDsaProblems()
         weeklyStatus = database.getWeeklyStreakStatus(loadedSettings)
         currentTime = System.currentTimeMillis()
+        if (loadedSettings.isFocusModeActive != isFocusMode) {
+            isFocusMode = loadedSettings.isFocusModeActive
+        }
+    }
+
+    fun toggleFocusMode() {
+        val next = !isFocusMode
+        isFocusMode = next
+        settings?.let {
+            database.updateSettings(it.copy(isFocusModeActive = next))
+        }
+        if (next && focusSecondsRemaining == 0) {
+            focusSecondsRemaining = 25 * 60
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -61,8 +78,22 @@ fun OverviewScreen(
         }
     }
 
+    LaunchedEffect(isFocusTimerRunning) {
+        if (isFocusTimerRunning) {
+            while (focusSecondsRemaining > 0 && isFocusTimerRunning) {
+                kotlinx.coroutines.delay(1000L)
+                focusSecondsRemaining--
+            }
+            if (focusSecondsRemaining == 0) {
+                isFocusTimerRunning = false
+            }
+        }
+    }
+
     val currentSettings = settings ?: return
-    val elapsedMinutes = ((currentTime - currentSettings.lastActiveTimestamp) / 60000).coerceAtLeast(0)
+    val rawElapsedMinutes = ((currentTime - currentSettings.lastActiveTimestamp) / 60000).coerceAtLeast(0)
+    val hasUnfinishedDebt = database.hasUnfinishedRolloverDebt(currentSettings)
+    val effectiveElapsedMinutes = if (hasUnfinishedDebt) maxOf(180, rawElapsedMinutes.toInt()) else rawElapsedMinutes.toInt()
     val isSnoozed = currentSettings.snoozedUntilMillis > currentTime
 
     val targetGoal = currentSettings.dailyTargetGoal
@@ -120,11 +151,157 @@ fun OverviewScreen(
             }
 
             PillButton(
-                text = "FOCUS MODE",
-                onClick = { isFocusMode = !isFocusMode },
+                text = if (isFocusMode) "EXIT FOCUS" else "FOCUS MODE",
+                onClick = { toggleFocusMode() },
                 hasRedDot = true,
                 isSolidWhite = isFocusMode
             )
+        }
+
+        if (isFocusMode) {
+            // --- FOCUS MODE CARD ---
+            NothingCard {
+                CardHeader(
+                    title = "FOCUS MODE // DEEP WORK",
+                    trailing = {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(NothingRed)
+                        )
+                    }
+                )
+
+                // Dot Matrix Timer Display
+                val timerMinutes = focusSecondsRemaining / 60
+                val timerSeconds = focusSecondsRemaining % 60
+                val timerText = String.format("%02d:%02d", timerMinutes, timerSeconds)
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        DotMatrixText(
+                            text = timerText,
+                            dotSize = 5.dp,
+                            activeColor = if (isFocusTimerRunning) NothingRed else TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (isFocusTimerRunning) "TIMER RUNNING • AI POKES MUTED" else "TIMER PAUSED",
+                            style = TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = if (isFocusTimerRunning) NothingRed else TextSecondary,
+                                letterSpacing = 1.sp
+                            )
+                        )
+                    }
+                }
+
+                // Timer Controls
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PillButton(
+                        text = if (isFocusTimerRunning) "PAUSE" else "START",
+                        onClick = { isFocusTimerRunning = !isFocusTimerRunning },
+                        isSolidWhite = isFocusTimerRunning,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PillButton(
+                        text = "RESET 25M",
+                        onClick = {
+                            isFocusTimerRunning = false
+                            focusSecondsRemaining = 25 * 60
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Target Task / Problem
+                val targetProblem = problems.firstOrNull { it.status != "SOLVED" }
+                if (targetProblem != null) {
+                    val nextItem = targetProblem.checklist.firstOrNull { !it.isCompleted }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF141414))
+                            .border(BorderStroke(1.dp, Color(0xFF282828)), RoundedCornerShape(8.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "TARGET // ${targetProblem.platform.uppercase()}",
+                                    style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = TextSecondary)
+                                )
+                                Text(
+                                    text = targetProblem.difficulty.uppercase(),
+                                    style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = NothingRed, fontWeight = FontWeight.Bold)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = targetProblem.title,
+                                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                            )
+                            if (nextItem != null) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFF1A1A1A))
+                                        .clickable {
+                                            database.updateChecklistItem(nextItem.id, true)
+                                            refreshData()
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .border(BorderStroke(1.dp, TextPrimary), RoundedCornerShape(3.dp)),
+                                        contentAlignment = Alignment.Center
+                                    ) {}
+                                    Text(
+                                        text = "Next: ${nextItem.text}",
+                                        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextPrimary),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "DONE ✓",
+                                        style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = StatusGreen, fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                PillButton(
+                    text = "EXIT FOCUS MODE",
+                    onClick = { toggleFocusMode() },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         // --- CARD 1: DAILY STREAK ---
@@ -297,7 +474,7 @@ fun OverviewScreen(
                         modifier = Modifier
                             .size(6.dp)
                             .clip(CircleShape)
-                            .background(if (isSnoozed) LeetCodeOrange else StatusGreen)
+                            .background(if (hasUnfinishedDebt) NothingRed else if (isSnoozed) LeetCodeOrange else StatusGreen)
                     )
                 }
             )
@@ -309,17 +486,18 @@ fun OverviewScreen(
                 Icon(
                     imageVector = Icons.Default.Timer,
                     contentDescription = null,
-                    tint = TextPrimary,
+                    tint = if (hasUnfinishedDebt) NothingRed else TextPrimary,
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
                     text = if (isSnoozed) "EXCUSED • ${SnoozeParser.formatDuration(currentSettings.snoozedUntilMillis)} REMAINING"
-                           else "ACTIVE • ${elapsedMinutes}M AGO",
+                           else if (hasUnfinishedDebt) "STAGE 3 MAX BRUTALITY • ${effectiveElapsedMinutes}M (DEBT PENDING)"
+                           else "ACTIVE • ${effectiveElapsedMinutes}M AGO",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp,
-                        color = TextPrimary
+                        color = if (hasUnfinishedDebt) NothingRed else TextPrimary
                     )
                 )
             }
@@ -339,13 +517,13 @@ fun OverviewScreen(
                         style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextSecondary)
                     )
                 }
-            } else if (elapsedMinutes >= 60 && currentSettings.latestPokeMessage.isNotBlank()) {
+            } else if ((hasUnfinishedDebt || effectiveElapsedMinutes >= 60) && currentSettings.latestPokeMessage.isNotBlank()) {
                 Spacer(modifier = Modifier.height(10.dp))
-                val pokeColor = when {
-                    elapsedMinutes < 90 -> TextPrimary
-                    elapsedMinutes < 180 -> LeetCodeOrange
-                    else -> NothingRed
-                }
+                val pokeColor = if (hasUnfinishedDebt || effectiveElapsedMinutes >= 180) NothingRed
+                                else if (effectiveElapsedMinutes >= 90) LeetCodeOrange
+                                else TextPrimary
+                val pokeTitle = if (hasUnfinishedDebt) "AGENT POKE (STAGE 3 MAX BRUTALITY // UNFINISHED DEBT):"
+                                else "AGENT POKE (${effectiveElapsedMinutes}M IDLE):"
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -356,7 +534,7 @@ fun OverviewScreen(
                 ) {
                     Column {
                         Text(
-                            text = "AGENT POKE (${elapsedMinutes}M IDLE):",
+                            text = pokeTitle,
                             style = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 9.sp, color = pokeColor)
                         )
                         Spacer(modifier = Modifier.height(3.dp))

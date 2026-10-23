@@ -57,6 +57,9 @@ class AppDatabase private constructor(context: Context) :
                 text TEXT NOT NULL,
                 is_completed INTEGER DEFAULT 0,
                 sort_order INTEGER DEFAULT 0,
+                difficulty TEXT DEFAULT '',
+                url TEXT DEFAULT '',
+                completed_at INTEGER,
                 FOREIGN KEY (problem_id) REFERENCES dsa_problems (id) ON DELETE CASCADE
             )
             """.trimIndent()
@@ -155,6 +158,9 @@ class AppDatabase private constructor(context: Context) :
         } catch (e: Exception) {}
         try {
             db.execSQL("ALTER TABLE dsa_checklists ADD COLUMN url TEXT DEFAULT ''")
+        } catch (e: Exception) {}
+        try {
+            db.execSQL("ALTER TABLE dsa_checklists ADD COLUMN completed_at INTEGER")
         } catch (e: Exception) {}
         try {
             db.execSQL("ALTER TABLE dsa_problems ADD COLUMN is_rolled_over INTEGER DEFAULT 0")
@@ -310,7 +316,6 @@ class AppDatabase private constructor(context: Context) :
             put("summary", summary)
         }
         db.insert("agent_activity_events", null, cv)
-        touchActive()
     }
 
     fun getEpisodicDigest(days: Int = 3): String {
@@ -398,7 +403,9 @@ class AppDatabase private constructor(context: Context) :
             sleepStartHour = map["sleep_start_hour"]?.toIntOrNull() ?: 3,
             sleepDurationHours = map["sleep_duration_hours"]?.toIntOrNull() ?: 7,
             isSleepDndEnabled = map["is_sleep_dnd_enabled"] != "false",
-            deepseekModel = map["deepseek_model"] ?: "deepseek-flash"
+            deepseekModel = map["deepseek_model"] ?: "deepseek-flash",
+            isFocusModeActive = map["is_focus_mode_active"] == "true",
+            focusSessionEndMillis = map["focus_session_end_millis"]?.toLongOrNull() ?: 0L
         )
     }
 
@@ -423,6 +430,8 @@ class AppDatabase private constructor(context: Context) :
             insertOrUpdateSettingRaw(db, "sleep_duration_hours", settings.sleepDurationHours.toString())
             insertOrUpdateSettingRaw(db, "is_sleep_dnd_enabled", settings.isSleepDndEnabled.toString())
             insertOrUpdateSettingRaw(db, "deepseek_model", settings.deepseekModel)
+            insertOrUpdateSettingRaw(db, "is_focus_mode_active", settings.isFocusModeActive.toString())
+            insertOrUpdateSettingRaw(db, "focus_session_end_millis", settings.focusSessionEndMillis.toString())
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -552,7 +561,7 @@ class AppDatabase private constructor(context: Context) :
     fun getChecklistForProblem(problemId: Long): List<ChecklistItem> {
         val db = readableDatabase
         val list = mutableListOf<ChecklistItem>()
-        val cursor = db.rawQuery("SELECT id, problem_id, text, is_completed, sort_order, difficulty, url FROM dsa_checklists WHERE problem_id = ? ORDER BY sort_order ASC, id ASC", arrayOf(problemId.toString()))
+        val cursor = db.rawQuery("SELECT id, problem_id, text, is_completed, sort_order, difficulty, url, completed_at FROM dsa_checklists WHERE problem_id = ? ORDER BY sort_order ASC, id ASC", arrayOf(problemId.toString()))
         cursor.use { c ->
             while (c.moveToNext()) {
                 list.add(
@@ -563,7 +572,8 @@ class AppDatabase private constructor(context: Context) :
                         isCompleted = c.getInt(3) == 1,
                         sortOrder = c.getInt(4),
                         difficulty = if (c.columnCount > 5 && !c.isNull(5)) c.getString(5) else "",
-                        url = if (c.columnCount > 6 && !c.isNull(6)) c.getString(6) else ""
+                        url = if (c.columnCount > 6 && !c.isNull(6)) c.getString(6) else "",
+                        completedAt = if (c.columnCount > 7 && !c.isNull(7)) c.getLong(7) else null
                     )
                 )
             }
@@ -603,6 +613,11 @@ class AppDatabase private constructor(context: Context) :
                         put("sort_order", index)
                         put("difficulty", item.difficulty)
                         put("url", item.url)
+                        if (item.completedAt != null) {
+                            put("completed_at", item.completedAt)
+                        } else if (item.isCompleted) {
+                            put("completed_at", System.currentTimeMillis())
+                        }
                     }
                     db.insert("dsa_checklists", null, chCv)
                 }
@@ -619,29 +634,26 @@ class AppDatabase private constructor(context: Context) :
         val db = writableDatabase
         ensureSchemaColumns(db)
 
-        var wasCompleted = false
         var pId: Long? = null
-        val prevCursor = db.rawQuery("SELECT is_completed, problem_id FROM dsa_checklists WHERE id = ?", arrayOf(itemId.toString()))
+        val prevCursor = db.rawQuery("SELECT problem_id FROM dsa_checklists WHERE id = ?", arrayOf(itemId.toString()))
         prevCursor.use {
             if (it.moveToNext()) {
-                wasCompleted = it.getInt(0) == 1
-                pId = it.getLong(1)
+                pId = it.getLong(0)
             }
         }
 
+        val completedAt = if (isCompleted) System.currentTimeMillis() else null
         val cv = ContentValues().apply {
             put("is_completed", if (isCompleted) 1 else 0)
+            if (completedAt != null) {
+                put("completed_at", completedAt)
+            } else {
+                putNull("completed_at")
+            }
         }
         db.update("dsa_checklists", cv, "id = ?", arrayOf(itemId.toString()))
         logActivityEvent("QUESTION_CHECKED", "Question toggled ($isCompleted)")
         touchActive()
-
-        // Increment or decrement streak per individual checklist question
-        if (isCompleted && !wasCompleted) {
-            incrementStreakDaily(dsaCountDelta = 1)
-        } else if (!isCompleted && wasCompleted) {
-            incrementStreakDaily(dsaCountDelta = -1)
-        }
 
         // Auto-sync status of parent tile
         try {
@@ -663,14 +675,12 @@ class AppDatabase private constructor(context: Context) :
                 }
             }
         } catch (e: Exception) {}
+
+        syncStreakForToday()
     }
 
     fun updateDsaProblemStatus(problemId: Long, status: String) {
         val db = writableDatabase
-        var oldStatus = "TODO"
-        val cursor = db.rawQuery("SELECT status FROM dsa_problems WHERE id = ?", arrayOf(problemId.toString()))
-        cursor.use { if (it.moveToNext()) oldStatus = it.getString(0) }
-
         val completedAt = if (status == "SOLVED") System.currentTimeMillis() else null
         val cv = ContentValues().apply {
             put("status", status)
@@ -678,17 +688,9 @@ class AppDatabase private constructor(context: Context) :
         }
         db.update("dsa_problems", cv, "id = ?", arrayOf(problemId.toString()))
         touchActive()
+        logActivityEvent("DSA_STATUS", "Problem #$problemId -> $status")
 
-        // Only adjust streak if problem has no checklists (standalone problem)
-        val checklistCount = getChecklistForProblem(problemId).size
-        if (checklistCount == 0) {
-            if (status == "SOLVED" && oldStatus != "SOLVED") {
-                incrementStreakDaily(dsaCountDelta = 1)
-                logActivityEvent("DSA_SOLVED", "Problem #$problemId solved")
-            } else if (status != "SOLVED" && oldStatus == "SOLVED") {
-                incrementStreakDaily(dsaCountDelta = -1)
-            }
-        }
+        syncStreakForToday()
     }
 
     fun deleteDsaProblem(problemId: Long) {
@@ -746,7 +748,8 @@ class AppDatabase private constructor(context: Context) :
             put("updated_at", System.currentTimeMillis())
         }
         db.update("courses", cv, "id = ?", arrayOf(courseId.toString()))
-        incrementStreakDaily(courseCountDelta = 1)
+        touchActive()
+        syncStreakForToday(courseDelta = 1)
         logActivityEvent("COURSE_PROGRESS", "Course #$courseId modules: $completedModules ($currentTopic)")
     }
 
@@ -815,43 +818,116 @@ class AppDatabase private constructor(context: Context) :
     }
 
     // --- Streak & Stats Operations ---
-    fun incrementStreakDaily(dsaCountDelta: Int = 0, courseCountDelta: Int = 0) {
-        val db = writableDatabase
-        val settings = getSettings()
-        val today = getLogicalDateString(settings)
-        var currentDsa = 0
-        var currentCourse = 0
-
-        val cursor = db.rawQuery("SELECT dsa_solved_count, course_progress_count FROM streak_logs WHERE date = ?", arrayOf(today))
-        cursor.use {
-            if (it.moveToNext()) {
-                currentDsa = it.getInt(0)
-                currentCourse = it.getInt(1)
-            }
+    fun getLogicalDayBounds(settings: AppSettings = getSettings()): Pair<Long, Long> {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Kolkata"))
+        val currentHour = cal.get(Calendar.HOUR_OF_DAY)
+        if (currentHour < settings.dayCutoffHour) {
+            cal.add(Calendar.DAY_OF_YEAR, -1)
         }
-
-        val newDsa = (currentDsa + dsaCountDelta).coerceAtLeast(0)
-        val newCourse = (currentCourse + courseCountDelta).coerceAtLeast(0)
-        val cv = ContentValues().apply {
-            put("date", today)
-            put("dsa_solved_count", newDsa)
-            put("course_progress_count", newCourse)
-            put("is_streak_day", if (newDsa > 0 || newCourse > 0) 1 else 0)
-        }
-        db.insertWithOnConflict("streak_logs", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        cal.set(Calendar.HOUR_OF_DAY, settings.dayCutoffHour)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        val startMillis = cal.timeInMillis
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        val endMillis = cal.timeInMillis
+        return Pair(startMillis, endMillis)
     }
 
     fun getTodaySolvedDsaCount(settings: AppSettings = getSettings()): Int {
         val db = readableDatabase
-        val today = getLogicalDateString(settings)
-        var count = 0
-        val cursor = db.rawQuery("SELECT dsa_solved_count FROM streak_logs WHERE date = ?", arrayOf(today))
-        cursor.use {
-            if (it.moveToNext()) {
-                count = it.getInt(0)
+        ensureSchemaColumns(db)
+        val (startMillis, endMillis) = getLogicalDayBounds(settings)
+
+        var checklistCount = 0
+        val cCursor = db.rawQuery(
+            "SELECT count(*) FROM dsa_checklists WHERE is_completed = 1 AND completed_at >= ? AND completed_at < ?",
+            arrayOf(startMillis.toString(), endMillis.toString())
+        )
+        cCursor.use { if (it.moveToNext()) checklistCount = it.getInt(0) }
+
+        var standaloneCount = 0
+        val pCursor = db.rawQuery(
+            "SELECT id FROM dsa_problems WHERE status = 'SOLVED' AND completed_at >= ? AND completed_at < ?",
+            arrayOf(startMillis.toString(), endMillis.toString())
+        )
+        pCursor.use {
+            while (it.moveToNext()) {
+                val pid = it.getLong(0)
+                if (getChecklistForProblem(pid).isEmpty()) {
+                    standaloneCount++
+                }
             }
         }
-        return count
+
+        return checklistCount + standaloneCount
+    }
+
+    fun syncStreakForToday(settings: AppSettings = getSettings(), courseDelta: Int = 0) {
+        val db = writableDatabase
+        val today = getLogicalDateString(settings)
+        val solvedToday = getTodaySolvedDsaCount(settings)
+        var currentCourse = 0
+        val cursor = db.rawQuery("SELECT course_progress_count FROM streak_logs WHERE date = ?", arrayOf(today))
+        cursor.use {
+            if (it.moveToNext()) {
+                currentCourse = it.getInt(0)
+            }
+        }
+        val newCourse = (currentCourse + courseDelta).coerceAtLeast(0)
+        val cv = ContentValues().apply {
+            put("date", today)
+            put("dsa_solved_count", solvedToday)
+            put("course_progress_count", newCourse)
+            put("is_streak_day", if (solvedToday > 0 || newCourse > 0) 1 else 0)
+        }
+        db.insertWithOnConflict("streak_logs", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun hasUnfinishedRolloverDebt(settings: AppSettings = getSettings()): Boolean {
+        val db = readableDatabase
+        ensureSchemaColumns(db)
+        val (startMillis, _) = getLogicalDayBounds(settings)
+
+        val rolloverCursor = db.rawQuery(
+            "SELECT count(*) FROM dsa_problems WHERE is_rolled_over = 1 AND status != 'SOLVED'",
+            null
+        )
+        var count = 0
+        rolloverCursor.use { if (it.moveToNext()) count = it.getInt(0) }
+        if (count > 0) return true
+
+        val pastCursor = db.rawQuery(
+            "SELECT count(*) FROM dsa_problems WHERE created_at < ? AND status != 'SOLVED'",
+            arrayOf(startMillis.toString())
+        )
+        var pastCount = 0
+        pastCursor.use { if (it.moveToNext()) pastCount = it.getInt(0) }
+        return pastCount > 0
+    }
+
+    fun getEffectiveInactivityMinutes(settings: AppSettings = getSettings()): Int {
+        val rawElapsedMinutes = ((System.currentTimeMillis() - settings.lastActiveTimestamp) / 60000).toInt().coerceAtLeast(0)
+        return if (hasUnfinishedRolloverDebt(settings)) {
+            maxOf(180, rawElapsedMinutes)
+        } else {
+            rawElapsedMinutes
+        }
+    }
+
+    fun reconcileStreakLogs() {
+        val db = writableDatabase
+        ensureSchemaColumns(db)
+        val settings = getSettings()
+
+        // Backfill completed_at for legacy completed checklist items where completed_at is NULL
+        db.execSQL("""
+            UPDATE dsa_checklists 
+            SET completed_at = (SELECT created_at FROM dsa_problems WHERE dsa_problems.id = dsa_checklists.problem_id)
+            WHERE is_completed = 1 AND (completed_at IS NULL OR completed_at = 0)
+        """)
+
+        syncStreakForToday(settings)
     }
 
     fun calculateStreak(settings: AppSettings = getSettings()): Int {
@@ -930,36 +1006,7 @@ class AppDatabase private constructor(context: Context) :
         return result
     }
 
-    fun syncStreakLogsFromHistory() {
-        val db = writableDatabase
-        val settings = getSettings()
-        val today = getLogicalDateString(settings)
 
-        var checklistDone = 0
-        val cCursor = db.rawQuery("SELECT count(*) FROM dsa_checklists WHERE is_completed = 1", null)
-        cCursor.use { if (it.moveToNext()) checklistDone = it.getInt(0) }
-
-        var standaloneDone = 0
-        val pCursor = db.rawQuery("SELECT id FROM dsa_problems WHERE status = 'SOLVED'", null)
-        pCursor.use {
-            while (it.moveToNext()) {
-                val pid = it.getLong(0)
-                if (getChecklistForProblem(pid).isEmpty()) {
-                    standaloneDone++
-                }
-            }
-        }
-
-        val totalDsa = checklistDone + standaloneDone
-        if (totalDsa > 0) {
-            val cv = ContentValues().apply {
-                put("date", today)
-                put("dsa_solved_count", totalDsa)
-                put("is_streak_day", 1)
-            }
-            db.insertWithOnConflict("streak_logs", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-        }
-    }
 
     fun exportToJson(): String {
         val root = JSONObject()

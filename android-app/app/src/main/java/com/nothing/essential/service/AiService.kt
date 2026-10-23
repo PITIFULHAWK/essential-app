@@ -355,10 +355,9 @@ OUTPUT STRICTLY VALID JSON (no markdown formatting, no backticks):
     suspend fun synthesizeInactivityPoke(
         context: Context,
         inactivityMinutes: Int,
-        episodicDigest: String
+        episodicDigest: String,
+        hasRolloverDebt: Boolean = episodicDigest.contains("CARRIED OVER") || episodicDigest.contains("UNFINISHED DEBT")
     ): String = withContext(Dispatchers.IO) {
-        val hasRolloverDebt = episodicDigest.contains("CARRIED OVER") || episodicDigest.contains("UNFINISHED DEBT")
-
         val debtInstruction = if (hasRolloverDebt) {
             """
 CRITICAL BULLY DIRECTIVE:
@@ -368,6 +367,15 @@ RUTHLESSLY bully them for this specific failure. Call out their procrastination,
         } else ""
 
         val stagePrompt = when {
+            hasRolloverDebt || inactivityMinutes >= 180 -> """
+You are an uncompromising, unfiltered drill sergeant who does not tolerate excuses.
+The user has carried over UNFINISHED problems from yesterday into today (accumulated debt).
+Stage 3 (Maximum Level): Deliver ONE brutal, unfiltered reality check. Call out their unfinished problems from yesterday, their excuses, and their lagging queue. Remind them that tech interviews and bootcamps don't care about excuses. Break their inertia right now.
+$debtInstruction
+Keep it strictly 1 to 2 sentences. No conversational filler.
+Digest:
+$episodicDigest
+"""
             inactivityMinutes < 90 -> """
 You are an austere, intellectual, and poetic focus coach for a software engineer.
 The user has been inactive for $inactivityMinutes minutes.
@@ -377,19 +385,10 @@ Keep it strictly 1 to 2 sentences. No conversational filler.
 Digest:
 $episodicDigest
 """
-            inactivityMinutes < 180 -> """
+            else -> """
 You are a sharp, sarcastic, and witty tech lead watching a junior engineer procrastinate.
 The user has been inactive for $inactivityMinutes minutes.
 Stage 2: Deliver ONE razor-sharp, sarcastic reality check about their dying streak, their 100xDevs bootcamp progress, and LeetCode/Codeforces procrastination. Be witty, direct, and push them to open their editor right now.
-$debtInstruction
-Keep it strictly 1 to 2 sentences. No conversational filler.
-Digest:
-$episodicDigest
-"""
-            else -> """
-You are an uncompromising, unfiltered drill sergeant who does not tolerate excuses.
-The user has been inactive for $inactivityMinutes minutes (over 3 hours of procrastination).
-Stage 3: Deliver ONE brutal, unfiltered reality check. Call out their excuses, the empty queue, or the half-finished problem. Remind them that tech interviews and bootcamps don't care about excuses. Break their inertia right now.
 $debtInstruction
 Keep it strictly 1 to 2 sentences. No conversational filler.
 Digest:

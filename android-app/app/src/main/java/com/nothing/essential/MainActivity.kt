@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
         checkAndRequestPermissions()
 
         val database = AppDatabase.getInstance(this)
-        database.syncStreakLogsFromHistory()
+        database.reconcileStreakLogs()
 
         setContent {
             NothingTheme {

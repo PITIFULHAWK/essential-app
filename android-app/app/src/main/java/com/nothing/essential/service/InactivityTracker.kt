@@ -93,7 +93,14 @@ object InactivityTracker {
             return
         }
 
-        // 2. Perform daily rollover check for past logical days
+        // 2. Check Focus Mode (Deep Work DND)
+        if (settings.isFocusModeActive) {
+            // Suppress pokes and nudges during active Focus Mode deep work session
+            scheduleNextCheck(context, 15)
+            return
+        }
+
+        // 3. Perform daily rollover check for past logical days
         try {
             db.performDailyRolloverCheck()
         } catch (e: Exception) {}
@@ -107,22 +114,32 @@ object InactivityTracker {
             return
         }
 
-        val elapsedMillis = now - settings.lastActiveTimestamp
-        val elapsedMinutes = (elapsedMillis / 60000).toInt()
+        val hasDebt = db.hasUnfinishedRolloverDebt(settings)
+        val effectiveMinutes = db.getEffectiveInactivityMinutes(settings)
 
-        if (elapsedMinutes >= 60 && settings.isPokeEnabled) {
-            // Trigger Escalating Brutality Poke sequentially within coroutine
+        if (hasDebt && settings.isPokeEnabled) {
+            // Immediate Maximum Level / Stage 3 Brutality for unfinished previous day's problems
             try {
                 val digest = db.getEpisodicDigest()
-                val pokeMessage = AiService.synthesizeInactivityPoke(context, elapsedMinutes, digest)
+                val pokeMessage = AiService.synthesizeInactivityPoke(context, effectiveMinutes, digest, hasRolloverDebt = true)
                 db.setLatestPokeMessage(pokeMessage)
-                showEscalatingPokeNotification(context, elapsedMinutes, pokeMessage)
+                showEscalatingPokeNotification(context, effectiveMinutes, pokeMessage)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-        } else if (elapsedMinutes >= settings.nudgeIntervalMinutes && settings.isNudgeEnabled) {
+        } else if (effectiveMinutes >= 60 && settings.isPokeEnabled) {
+            // Trigger Escalating Brutality Poke sequentially within coroutine
+            try {
+                val digest = db.getEpisodicDigest()
+                val pokeMessage = AiService.synthesizeInactivityPoke(context, effectiveMinutes, digest, hasRolloverDebt = false)
+                db.setLatestPokeMessage(pokeMessage)
+                showEscalatingPokeNotification(context, effectiveMinutes, pokeMessage)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        } else if (effectiveMinutes >= settings.nudgeIntervalMinutes && settings.isNudgeEnabled) {
             // Standard gentle reminder
-            showGentleNudgeNotification(context, elapsedMinutes)
+            showGentleNudgeNotification(context, effectiveMinutes)
         }
 
         scheduleNextCheck(context, settings.nudgeIntervalMinutes)

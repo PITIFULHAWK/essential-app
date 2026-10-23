@@ -30,7 +30,8 @@ data class ChecklistItem(
     val isCompleted: Boolean = false,
     val sortOrder: Int = 0,
     val difficulty: String = "", // "EASY", "MEDIUM", "HARD" or empty
-    val url: String = ""         // Direct problem URL if part of a contest tile
+    val url: String = "",        // Direct problem URL if part of a contest tile
+    val completedAt: Long? = null
 )
 
 data class ContestQuestion(
@@ -113,7 +114,9 @@ data class AppSettings(
     val sleepStartHour: Int = 3,        // 3 AM IST
     val sleepDurationHours: Int = 7,    // 7 hours (wake at 10 AM IST)
     val isSleepDndEnabled: Boolean = true,
-    val deepseekModel: String = "deepseek-flash" // DeepSeek 4.1 Flash
+    val deepseekModel: String = "deepseek-flash", // DeepSeek 4.1 Flash
+    val isFocusModeActive: Boolean = false,
+    val focusSessionEndMillis: Long = 0L
 )
 
 data class ScheduleParseResult(
